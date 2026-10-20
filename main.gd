@@ -110,6 +110,15 @@ var bot_dash := false
 var test_menu_i := 0
 var splash_t := 0.0
 
+# touch / web
+var touch_ui := false
+var lite := false
+var joy_id := -1
+var joy_origin := Vector2.ZERO
+var joy_vec := Vector2.ZERO
+var dash_id := -1
+var dash_touch := false
+
 
 # ================================================================== SETUP
 func _ready() -> void:
@@ -128,6 +137,8 @@ func _ready() -> void:
 	hud.draw.connect(_draw_hud)
 	Game.achievement_unlocked.connect(_on_achievement)
 	biome = Game.biomes[0]
+	lite = OS.has_feature("web") or OS.has_feature("mobile")
+	touch_ui = DisplayServer.is_touchscreen_available() and (OS.has_feature("web") or OS.has_feature("mobile"))
 	for a in OS.get_cmdline_user_args():
 		if str(a).begins_with("--test="):
 			test_mode = true
@@ -180,6 +191,9 @@ func _input(event: InputEvent) -> void:
 		if pressed and splash_t >= 15.0:
 			screen = "menu"
 		return
+	if event is InputEventScreenTouch or event is InputEventScreenDrag:
+		_touch_input(event)
+		return
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		var mp := hud.get_local_mouse_position()
 		for b in buttons:
@@ -209,6 +223,42 @@ func _input(event: InputEvent) -> void:
 				screen = "menu"
 
 
+func _touch_input(event: InputEvent) -> void:
+	touch_ui = true
+	if screen != "play":
+		joy_id = -1
+		joy_vec = Vector2.ZERO
+		dash_id = -1
+		dash_touch = false
+		return
+	var vs := vsize()
+	if event is InputEventScreenTouch:
+		var p: Vector2 = event.position
+		if event.pressed:
+			if p.distance_to(dash_center(vs)) < 100.0 and dash_id == -1:
+				dash_id = event.index
+				dash_touch = true
+			elif p.x < vs.x * 0.55 and joy_id == -1:
+				joy_id = event.index
+				joy_origin = p
+				joy_vec = Vector2.ZERO
+		else:
+			if event.index == joy_id:
+				joy_id = -1
+				joy_vec = Vector2.ZERO
+			if event.index == dash_id:
+				dash_id = -1
+				dash_touch = false
+	elif event is InputEventScreenDrag:
+		if event.index == joy_id:
+			var d: Vector2 = event.position - joy_origin
+			joy_vec = d.limit_length(70.0) / 70.0
+
+
+func dash_center(vs: Vector2) -> Vector2:
+	return Vector2(vs.x - 120.0, vs.y - 130.0)
+
+
 func on_button(id: String) -> void:
 	if id == "adventure":
 		screen = "biomes"
@@ -230,6 +280,8 @@ func on_button(id: String) -> void:
 		Game.ascend()
 	elif id == "resume":
 		screen = "play"
+	elif id == "pause":
+		screen = "paused"
 	elif id == "retry":
 		start_run(mode, biome_idx)
 	elif id == "menu":
@@ -239,6 +291,8 @@ func on_button(id: String) -> void:
 
 
 func get_input_vector() -> Vector2:
+	if joy_vec.length() > 0.12:
+		return joy_vec
 	var v := Vector2.ZERO
 	if Input.is_physical_key_pressed(KEY_W) or Input.is_physical_key_pressed(KEY_UP):
 		v.y -= 1.0
@@ -373,7 +427,7 @@ func step(dt_in: float) -> void:
 # ------------------------------------------------------------------ player
 func update_player(dt: float) -> void:
 	var mv := bot_move if test_mode else get_input_vector()
-	var want_dash := bot_dash if test_mode else (Input.is_physical_key_pressed(KEY_SPACE) or Input.is_physical_key_pressed(KEY_SHIFT))
+	var want_dash := bot_dash if test_mode else (dash_touch or Input.is_physical_key_pressed(KEY_SPACE) or Input.is_physical_key_pressed(KEY_SHIFT))
 	if want_dash and not dash_prev and dash_cd <= 0.0 and dash_t <= 0.0:
 		dash_dir = mv if mv != Vector2.ZERO else aim_dir
 		dash_t = 0.18
@@ -587,7 +641,7 @@ func damage_enemy(e: Dictionary, amount: float, crit: bool) -> void:
 		return
 	e["hp"] -= amount
 	e["flash"] = 0.07
-	if dtexts.size() < 40 and (crit or rng.randf() < 0.35):
+	if dtexts.size() < (14 if lite else 40) and (crit or rng.randf() < 0.35):
 		var p: Vector2 = e["pos"]
 		dtexts.append({
 			"pos": p + Vector2(rng.randf_range(-8.0, 8.0), -float(e["r"])),
@@ -694,7 +748,7 @@ func update_ebullets(dt: float) -> void:
 
 
 func enemy_bullet(p: Vector2, v: Vector2, dmg: float, r: float = 6.0) -> void:
-	if ebullets.size() > 700:
+	if ebullets.size() > (420 if lite else 700):
 		return
 	ebullets.append({"pos": p, "vel": v, "dmg": dmg, "r": r, "life": 7.0})
 
@@ -752,6 +806,8 @@ func spawn_logic(dt: float) -> void:
 		return
 	var alive := enemies.size()
 	var cap := 520 if mode == "adventure" else 760
+	if lite:
+		cap = 300 if mode == "adventure" else 380
 	var rate: float
 	if mode == "adventure":
 		rate = (2.4 + 0.05 * run_time) * float(biome["density"])
@@ -1004,7 +1060,7 @@ func finish_attack(e: Dictionary, phase: int) -> void:
 # ------------------------------------------------------------------ fx
 func burst(p: Vector2, col: Color, n: int, spd: float, size: float) -> void:
 	for i in n:
-		if particles.size() > 450:
+		if particles.size() > (140 if lite else 450):
 			return
 		var a := rng.randf() * TAU
 		var s := rng.randf_range(0.25, 1.0) * spd
@@ -1572,12 +1628,16 @@ func _menu(cx: float, vs: Vector2) -> void:
 	y += 68.0
 	_btn(hud, Rect2(cx - 190, y, 380, 56), "ACHIEVEMENTS  %d/%d" % [Game.unlocked_count(), Game.achievements.size()], "achv")
 	y += 68.0
-	_btn(hud, Rect2(cx - 190, y, 380, 56), "QUIT", "quit")
+	if not OS.has_feature("web"):
+		_btn(hud, Rect2(cx - 190, y, 380, 56), "QUIT", "quit")
 	var info := "Souls: %d     Rank: %d  (+%d%% damage & souls)" % [int(Game.data["souls"]), int(Game.data["rank"]), int(round((Game.prestige_mult() - 1.0) * 100.0))]
 	if int(Game.data["best_horde"]) > 0:
 		info += "     Best horde: " + _fmt_time(float(Game.data["best_horde"]))
 	_t(hud, info, Vector2(0, vs.y - 60), 22, Color(1.0, 0.85, 0.4), HORIZONTAL_ALIGNMENT_CENTER, vs.x)
-	_t(hud, "WASD / Arrows: move     Space / Shift: dash     Your gun fires automatically     Esc: pause", Vector2(0, vs.y - 28), 18, Color(0.7, 0.75, 0.85), HORIZONTAL_ALIGNMENT_CENTER, vs.x)
+	var hint := "WASD / Arrows: move     Space / Shift: dash     Your gun fires automatically     Esc: pause"
+	if touch_ui:
+		hint = "Drag on the left to move     Tap DASH on the right     Your gun fires automatically"
+	_t(hud, hint, Vector2(0, vs.y - 28), 18, Color(0.7, 0.75, 0.85), HORIZONTAL_ALIGNMENT_CENTER, vs.x)
 
 
 func _screen_biomes(cx: float, vs: Vector2) -> void:
@@ -1663,6 +1723,22 @@ func _screen_achv(cx: float, vs: Vector2) -> void:
 
 
 func _play_hud(cx: float, vs: Vector2) -> void:
+	if screen == "play":
+		_btn(hud, Rect2(vs.x - 74, 90, 54, 44), "II", "pause", true, 22)
+		if touch_ui:
+			if joy_id != -1:
+				hud.draw_circle(joy_origin, 70.0, Color(1, 1, 1, 0.10))
+				hud.draw_arc(joy_origin, 70.0, 0.0, TAU, 40, Color(1, 1, 1, 0.35), 3.0)
+				hud.draw_circle(joy_origin + joy_vec * 70.0, 30.0, Color(1, 1, 1, 0.35))
+			else:
+				var hp := Vector2(150.0, vs.y - 130.0)
+				hud.draw_arc(hp, 70.0, 0.0, TAU, 40, Color(1, 1, 1, 0.18), 3.0)
+				_t(hud, "MOVE", hp + Vector2(-50, 8), 20, Color(1, 1, 1, 0.35), HORIZONTAL_ALIGNMENT_CENTER, 100.0)
+			var dc := dash_center(vs)
+			var ready_d := dash_cd <= 0.0
+			hud.draw_circle(dc, 62.0, Color(0.4, 0.8, 1.0, 0.35 if (ready_d and not dash_touch) else 0.15))
+			hud.draw_arc(dc, 62.0, 0.0, TAU, 40, Color(0.6, 0.9, 1.0, 0.6 if ready_d else 0.25), 3.0)
+			_t(hud, "DASH", dc + Vector2(-50, 8), 22, Color(1, 1, 1, 0.8 if ready_d else 0.35), HORIZONTAL_ALIGNMENT_CENTER, 100.0)
 	if damage_flash > 0.0:
 		var a := damage_flash * 0.8
 		hud.draw_rect(Rect2(0, 0, vs.x, 24), Color(1, 0, 0, a))
